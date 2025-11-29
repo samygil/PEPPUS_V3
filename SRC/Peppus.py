@@ -4,14 +4,14 @@
 # Peppus.py:
 # This is the Main Module of PEPPUS tool
 #
-#  Project:        PEPPUS
-#  File:           Peppus.py
+#   Project:        PEPPUS
+#   File:           Peppus.py
 #
 #   Author: GNSS Academy
 #   Copyright GNSS Academy
 #
 # -----------------------------------------------------------------
-# Date       | Author             | Action
+# Date       | Author               | Action
 # -----------------------------------------------------------------
 #
 # Usage:
@@ -43,12 +43,14 @@ from InputOutput import generateCorrFile
 from InputOutput import PreproHdr, CorrHdr
 from InputOutput import CSNEPOCHS, CSNPOINTS
 from InputOutput import RcvrIdx, ObsIdx
+from InputOutput import PosHdr, generatePosFile
 from Preprocessing import runPreProcMeas
 from PreprocessingPlots import generatePreproPlots
 from Corrections import runCorrectMeas
 from CorrectionsPlots import generateCorrPlots
 from COMMON.Dates import convertJulianDay2YearMonthDay
 from COMMON.Dates import convertYearMonthDay2Doy
+from Kpvt import initKpvtSolution, computeKpvtSolution
 
 #----------------------------------------------------------------------
 # INTERNAL FUNCTIONS
@@ -61,7 +63,7 @@ def displayUsage():
 # MAIN BODY
 #######################################################
 
-# Check InputOutput Arguments
+# Check Input/Output Arguments
 if len(sys.argv) != 2:
     displayUsage()
     sys.exit()
@@ -97,6 +99,23 @@ for Rcvr in RcvrInfo.keys():
     print( '\n***-----------------------------***')
     print( '*** Processing receiver: ' + Rcvr + '   ***')
     print( '***-----------------------------***')
+
+
+# >>> T2.1: Initializing Kalman Filter State and Covariance
+    print(f"DEBUG: Rcvr: {Rcvr}, Type: {type(RcvrInfo[Rcvr])}, Content: {RcvrInfo[Rcvr]}")
+    Xk_1, Pk_1, SatAmbiguityInfo = initKpvtSolution(Conf, RcvrInfo[Rcvr], Conf["INI_DATE_JD"])
+    
+    # CORRECTION: Retrieve the initial year from Conf since 'Year' is not defined here yet.
+    IniYear = Conf["INI_YEAR"]
+
+    # If PVT output is enabled, create the output file
+    if Conf["PVT_OUT"] == 1:
+        # Define the full path and name to the output PVT file
+        PvtFile = Scen + \
+            '/OUT/PVT/' + "PVT_%s_Y%02d.dat" % \
+                (Rcvr, IniYear % 100) # Use IniYear
+        # Create output file
+        fpvt = createOutputFile(PvtFile, PosHdr)
 
     # Loop over Julian Days in simulation
     #-----------------------------------------------------------------------
@@ -156,7 +175,7 @@ for Rcvr in RcvrInfo.keys():
                     (Rcvr, Year % 100, Doy)
 
             # Create output file
-            fcorr = createOutputFile(CorrFile, CorrHdr) ##########################
+            fcorr = createOutputFile(CorrFile, CorrHdr)
 
         # Initialize Variables
         EndOfFile = False
@@ -164,27 +183,27 @@ for Rcvr in RcvrInfo.keys():
         PrevPreproObsInfo = {}
         for prn in range(1, Const.MAX_NUM_SATS_CONSTEL + 1):
             PrevPreproObsInfo["G%02d" % prn] = {
-                "PrevEpoch": 86400,                                            # Previous SoD with measurements
-                "PrevL1": 0.0,                                                 # Previous L1
-                "PrevL2": 0.0,                                                 # Previous L2
-                "PrevC1": 0.0,                                                 # Previous Smoothed C1
-                "PrevP2": 0.0,                                                 # Previous Smoothed C2
-                "PrevRej": 1,                                                  # Previous Rejection flag
+                "PrevEpoch": 86400,                                             # Previous SoD with measurements
+                "PrevL1": 0.0,                                                  # Previous L1
+                "PrevL2": 0.0,                                                  # Previous L2
+                "PrevC1": 0.0,                                                  # Previous Smoothed C1
+                "PrevP2": 0.0,                                                  # Previous Smoothed C2
+                "PrevRej": 1,                                                   # Previous Rejection flag
                 
-                "CycleSlipBuffIdx": 0,                                         # Index of CS buffer
-                "CycleSlipFlagIdx": 0,                                         # Index of CS flag array
-                "GF_L_Prev": [0.0] * int(Conf["CYCLE_SLIPS"][CSNPOINTS]),      # Array with previous GF carrier phase observables
-                "GF_Epoch_Prev": [0.0] * int(Conf["CYCLE_SLIPS"][CSNPOINTS]),  # Array with previous epochs
-                "CycleSlipFlags": [0.0] * int(Conf["CYCLE_SLIPS"][CSNEPOCHS]), # Array with last cycle slips flags
+                "CycleSlipBuffIdx": 0,                                          # Index of CS buffer
+                "CycleSlipFlagIdx": 0,                                          # Index of CS flag array
+                "GF_L_Prev": [0.0] * int(Conf["CYCLE_SLIPS"][CSNPOINTS]),       # Array with previous GF carrier phase observables
+                "GF_Epoch_Prev": [0.0] * int(Conf["CYCLE_SLIPS"][CSNPOINTS]),   # Array with previous epochs
+                "CycleSlipFlags": [0.0] * int(Conf["CYCLE_SLIPS"][CSNEPOCHS]),  # Array with last cycle slips flags
                 
-                "PrevCode": Const.NAN,                                         # Previous Code
-                "PrevPhase": Const.NAN,                                        # Previous Phase
-                "PrevCodeRate": Const.NAN,                                     # Previous Code Rate
-                "PrevPhaseRate": Const.NAN,                                    # Previous Phase Rate
-                "PrevStec": Const.NAN,                                         # Previous STEC
-                "PrevStecEpoch": Const.NAN,                                    # Previous STEC epoch
+                "PrevCode": Const.NAN,                                          # Previous Code
+                "PrevPhase": Const.NAN,                                         # Previous Phase
+                "PrevCodeRate": Const.NAN,                                      # Previous Code Rate
+                "PrevPhaseRate": Const.NAN,                                     # Previous Phase Rate
+                "PrevStec": Const.NAN,                                          # Previous STEC
+                "PrevStecEpoch": Const.NAN,                                     # Previous STEC epoch
                 
-                "ResetAmb": 1,                                                 # Reset Ambiguities flag
+                "ResetAmb": 1,                                                  # Reset Ambiguities flag
             } # End of SatPreproObsInfo
 
         SatComPos_1 = {}
@@ -238,6 +257,35 @@ for Rcvr in RcvrInfo.keys():
                         if Conf["PCOR_OUT"] == 1:
                             # Generate output file
                             generateCorrFile(fcorr, CorrInfo)
+
+                        ###########################################################################
+                        # KALMAN PVT COMPUTATION
+   
+                        # Fix 1: Converte o dicionário CorrInfo (keys: 'GXX') em uma lista de dicionários
+                        CorrInfoList = list(CorrInfo.values())
+
+                        # Fix 2: Ajusta o print de debug para usar a lista convertida
+                        print(f"DEBUG PE: Antes do KPVT, CorrInfo size: {len(CorrInfoList)}")
+                        if CorrInfoList:
+                            print(f"DEBUG PE: Primeiro item do CorrInfo: {CorrInfoList[0]}")
+
+
+                        PosInfo, Xk, Pk, SatAmbiguityInfo = computeKpvtSolution(Conf, RcvrInfo[Rcvr], CorrInfoList, Xk_1, Pk_1, Doy, SatAmbiguityInfo)
+
+
+
+                        # Status and covariance for next epoch
+
+                        Xk_1 = Xk
+                        Pk_1 = Pk
+                        SatAmbiguityInfo_1 = SatAmbiguityInfo
+                        
+                        # KALMAN PVT COMPUTATION
+                        
+                        # If PVT output are requested
+                        if Conf["PVT_OUT"] == 1:
+                            # Generate output file
+                            generatePosFile(fpvt, PosInfo)
                         
                 # End of if ObsInfo != []:
 
@@ -265,20 +313,23 @@ for Rcvr in RcvrInfo.keys():
         # If PCOR outputs are requested
         if Conf["PCOR_OUT"] == 1:
             # Close PCOR output file
-            fcorr.close()##########################
-        
+            fcorr.close()
+            
             # Display Message
             print("INFO: Reading file: %s and generating PCOR figures..." %
             CorrFile)
-        
+            
             # Generate PCOR plots
             generateCorrPlots(CorrFile, RcvrInfo[Rcvr])
 
-    # End of JD loop
+    # End of Julian Day loop
+
+    if Conf["PVT_OUT"] == 1:
+        # Close PVT output file
+        fpvt.close()
 
 # End of RCVR loop
 
-print( '\n------------------------------------')
 print( '--> END OF PEPPUS ANALYSIS')
 print( '------------------------------------')
 

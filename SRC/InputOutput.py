@@ -21,12 +21,13 @@
 #----------------------------------------------------------------------
 import sys, os
 from collections import OrderedDict
-from COMMON.Dates import convertYearMonthDay2JulianDay
+from COMMON.Dates import convertYearMonthDay2JulianDay, convertYearMonthDay2Doy
 from COMMON import GnssConstants as Const
 from COMMON.Coordinates import llh2xyz
 import numpy as np
 from pandas import read_csv
 from pandas import unique
+import math
 
 # Input interfaces
 #----------------------------------------------------------------------
@@ -212,6 +213,34 @@ CorrIdx["SAIR"]=24
 CorrIdx["SNOISEDIV"]=25
 CorrIdx["SMP"]=26
 CorrIdx["SUERE"]=27
+
+
+
+# PVT
+# Header
+PosHdr = "\
+#SOD    DOY         LON             LAT             ALT             CLK   SOL  N_VIS   N_EST       HPE             VPE             EPE             NPE         Ambiguities...\n"
+
+# Line format
+PosFmt = "%05d %03d %14.8f %14.8f %14.8f %14.8f %4d %4d %4d %14.8f %14.8f %14.8f %14.8f ".split()
+
+# File columns
+PosIdx = OrderedDict({})
+PosIdx["SOD"]=0
+PosIdx["DOY"]=1
+PosIdx["LON"]=2
+PosIdx["LAT"]=3
+PosIdx["ALT"]=4
+PosIdx["CLK"]=5
+PosIdx["SOL"]=6
+PosIdx["NUMSATVIS"]=7
+PosIdx["NUMSAT"]=8
+PosIdx["HPE"]=9
+PosIdx["VPE"]=10
+PosIdx["EPE"]=11
+PosIdx["NPE"]=12
+PosIdx["AMB"]=13
+
 
 # Input functions
 #----------------------------------------------------------------------
@@ -746,6 +775,18 @@ def readConf(CfgFile):
                             # Increment number of read parameters
                             NReadParams = NReadParams + 1
 
+                        # Receiver Position Process Noise
+                           #----------------------------------------
+                           # p1: Receiver Position Process Noise sigma [m/sqrt(s)]
+                           #----------------------------------------
+                        elif Key== 'RCVRPOS_NOISE': 
+                            # Check parameter and load it in Conf
+                            Conf[Key] = checkConfParam(Key, Fields, 1, 1, 
+                            [0], [np.inf])
+
+                           # Increment number of read parameters
+                            NReadParams = NReadParams + 1
+
                         # Receiver Clock Process Noise
                         #----------------------------------------
                         # p1: Receiver Clock Process Noise sigma [m/h]
@@ -778,6 +819,35 @@ def readConf(CfgFile):
                             # Check parameter and load it in Conf
                             Conf[Key] = checkConfParam(Key, Fields, 1, 1, 
                             [0], [np.inf])
+
+                            # Increment number of read parameters
+                            NReadParams = NReadParams + 1
+
+                        # Minimum Number of Satellites for PVT Solution
+                        #----------------------------------------
+                        elif Key=='MIN_NSATS':
+                            # Check parameter and load it in Conf
+                            Conf[Key] = checkConfParam(Key, Fields, 1, 1, 
+                            [4], [32]) # Mínimo 4 satélites para solução 3D + relógio
+
+                            # Increment number of read parameters
+                            NReadParams = NReadParams + 1
+
+                        # PVT outputs selection [0:OFF|1:ON]
+                        #--------------------------------------------------------------------       
+                        elif Key=='PVT_OUT':
+                            # Check parameter and load it in Conf
+                            Conf[Key] = checkConfParam(Key, Fields, 1, 1, [0], [1])
+
+                            # Increment number of read parameters
+                            NReadParams = NReadParams + 1
+
+                        # XPE Convergence Threshold
+                        #----------------------------------------
+                        elif Key=='XPE_TH':
+                            # Check parameter and load it in Conf
+                            Conf[Key] = checkConfParam(Key, Fields, 2, 2, 
+                            [0, 0], [1e3, 1e3])
 
                             # Increment number of read parameters
                             NReadParams = NReadParams + 1
@@ -817,11 +887,21 @@ def readConf(CfgFile):
                             # Increment number of read parameters
                             NReadParams = NReadParams + 1
 
+                        # Other parameters
+                        else:
+                            # Warn user
+                            sys.stderr.write("WARNING: Unknown configuration parameter %s\n" % Key)
+                            # Exit
+                            # sys.exit(-1)
+
     # # Check number of conf parameters
     # if (NReadParams != 39):
     #     # Raise error
     #     sys.stderr.write("ERROR: Wrong number of conf parameters\n")
     #     sys.exit(-1)
+
+
+
 
     return Conf
 
@@ -858,7 +938,105 @@ def processConf(Conf):
                     )
                 )
 
+    # Processa Process Noise e Covariance Initialization
+    Conf["KALMAN_FILTER"] = {}
+    
+    # [m]
+    Conf["KALMAN_FILTER"]["P_A"] = float(Conf["COVARIANCE_INI"][0]) 
+    
+    # [m] (Ambiguity sigma_0)
+    Conf["KALMAN_FILTER"]["P_AMB"] = float(Conf["COVARIANCE_INI"][5])
+    
+    # [m/sqrt(s)] (Receiver Position Process Noise)
+    Conf["KALMAN_FILTER"]["Q_POS"] = float(Conf["RCVRPOS_NOISE"]) 
+    
+    # [m/sqrt(s)] (Receiver Clock Process Noise: O valor é em m/s na maioria das implementações, mas o parâmetro é lido em m, então assumimos que a conversão será tratada em Kpvt)
+    # Aqui apenas transferimos o valor lido do .cfg
+    Conf["KALMAN_FILTER"]["Q_CLK"] = float(Conf["RCVRCLK_NOISE"])
+    
+    # [m/sqrt(h)] (Delta ZTD Process Noise)
+    Conf["KALMAN_FILTER"]["Q_ZTD"] = float(Conf["DZTD_NOISE"])
+    
+    # [m] (Phase Measurement sigma)
+    Conf["KALMAN_FILTER"]["PHASE_SIGMA"] = float(Conf["PHASE_SIGMA"])
+
+    # [satélites] (Minimum Number of Satellites)
+    Conf["MIN_NSATS"] = int(Conf["MIN_NSATS"])
+
+    # Processa Datas
+    IniDateSplit = Conf['INI_DATE'].split('/')
+
+    Day = int(IniDateSplit[0])
+    Month = int(IniDateSplit[1])
+    Year = int(IniDateSplit[2])
+
+    Doy = convertYearMonthDay2Doy(Year, Month, Day)
+
+
+    Conf["INI_DOY"] = Doy
+    Conf["INI_YEAR"] = Year
+    
+    EndDateSplit = Conf["END_DATE"].split('/')
+    EndDay = int(EndDateSplit[0])
+    EndMonth = int(EndDateSplit[1])
+    EndYear = int(EndDateSplit[2])
+
+    # Usa a função correta que retorna um único Doy, e extrai o Ano separadamente.
+    Conf["END_DOY"] = convertYearMonthDay2Doy(EndYear, EndMonth, EndDay)
+    Conf["END_YEAR"] = EndYear
+
+    # Converte os outputs para booleanos/inteiros
+    Conf["PREPRO_OUT"] = bool(Conf["PREPRO_OUT"])
+    Conf["PCOR_OUT"] = bool(Conf["PCOR_OUT"])
+    Conf["PVT_OUT"] = bool(Conf["PVT_OUT"])
+    Conf["XPEHIST_OUT"] = bool(Conf["XPEHIST_OUT"])
+
     return Conf
+
+
+def generatePosFile(fpvt, PosInfo):
+    """
+    Escreve as informações de PosInfo no arquivo PVT.
+    fpvt: File pointer para o arquivo de saída PVT.
+    PosInfo: Dicionário contendo a solução PVT para a época.
+    """
+    if PosInfo['Sol'] == 0:
+        # Sem solução (NAN)
+        output_line = "{:9.1f}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}{:4d}{:4d}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}".format(
+            PosInfo["Sod"],
+            PosInfo["Doy"],
+            Const.NAN, Const.NAN, Const.NAN, Const.NAN,
+            PosInfo["Sol"],
+            PosInfo["NumSatVis"],
+            0, # NumSat (estimados)
+            Const.NAN, Const.NAN, Const.NAN, Const.NAN
+        )
+    else:
+        # Valores estáticos (Sod a Npe)
+        R2D = 180.0 / math.pi
+        output_line = "{:9.1f}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}{:4d}{:4d}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}".format(
+            PosInfo["Sod"],
+            PosInfo["Doy"],
+            PosInfo["Lon"] * R2D, # Convertido para graus
+            PosInfo["Lat"] * R2D, # Convertido para graus
+            PosInfo["Alt"],
+            PosInfo["Clk"],
+            PosInfo["Sol"],
+            PosInfo["NumSatVis"],
+            PosInfo["NumSat"],
+            PosInfo["Hpe"],
+            PosInfo["Vpe"],
+            PosInfo["Epe"],
+            PosInfo["Npe"]
+        )
+        
+        # Ambiguidades (flat array)
+        if "Amb" in PosInfo and PosInfo["Amb"].size > 0:
+            # Assumimos que Amb é um array NumPy de ambiguidades estimadas
+            amb_str = "".join(["{:14.8f}".format(amb) for amb in PosInfo["Amb"].flatten()])
+            output_line += amb_str
+    
+    fpvt.write(output_line + '\n')
 
 def readRcvr(RcvrFile):
     
