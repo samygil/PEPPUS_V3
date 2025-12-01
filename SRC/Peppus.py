@@ -265,9 +265,9 @@ for Rcvr in RcvrInfo.keys():
                         CorrInfoList = list(CorrInfo.values())
 
                         # Fix 2: Ajusta o print de debug para usar a lista convertida
-                        print(f"DEBUG PE: Antes do KPVT, CorrInfo size: {len(CorrInfoList)}")
-                        if CorrInfoList:
-                            print(f"DEBUG PE: Primeiro item do CorrInfo: {CorrInfoList[0]}")
+                        # print(f"DEBUG PE: Antes do KPVT, CorrInfo size: {len(CorrInfoList)}")
+                        # if CorrInfoList:
+                        #     print(f"DEBUG PE: Primeiro item do CorrInfo: {CorrInfoList[0]}")
 
 
                         PosInfo, Xk, Pk, SatAmbiguityInfo = computeKpvtSolution(Conf, RcvrInfo[Rcvr], CorrInfoList, Xk_1, Pk_1, Doy, SatAmbiguityInfo)

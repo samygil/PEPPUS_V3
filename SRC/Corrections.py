@@ -400,101 +400,6 @@ def is_valid_dtr(dtr):
     return True
 
 
-# def computeSatComPos(SatLabel, TransmissionTime, SatPosInfo, Sod, PosInterpOrder):
-#     """
-#     Computes the satellite Center of Mass (CoM) position at the signal transmission time
-#     using 10-point Lagrange interpolation over SP3 position data.
-
-#     Parameters
-#     ----------
-#     SatLabel : str
-#         Satellite identifier (e.g., 'G27').
-#     TransmissionTime : float
-#         Signal transmission time in seconds of day (SoD).
-#     SatPosInfo : dict
-#         Dictionary containing SP3 position data for each satellite.
-#     Sod : float
-#         Current epoch time in seconds of day (not used here but kept for interface consistency).
-#     PosInterpOrder : int
-#         Number of interpolation points (must be 10: 5 before + 5 after).
-
-#     Returns
-#     -------
-#     np.array
-#         Interpolated satellite position [X, Y, Z] in meters.
-#     """
-#     if PosInterpOrder != 10:
-#         raise ValueError("Expected 10-point Lagrange interpolation (5 before + 5 after)")
-
-#     # Step 1: Extract and sort available epochs and positions for the satellite
-#     time_list = np.array(sorted(SatPosInfo[SatLabel]["Epochs"]))  # SP3 epochs in seconds of day
-#     pos_list = np.array(SatPosInfo[SatLabel]["Positions"])        # Corresponding XYZ positions in kilometers
-
-#     # Step 2: If TransmissionTime matches an SP3 epoch, return the exact position (no interpolation)
-#     if TransmissionTime in time_list:
-#         idx = np.where(time_list == TransmissionTime)[0][0]
-#         return np.array(pos_list[idx]) * 1000  # Convert from km to m
-
-#     # Step 3: Separate epochs before and after the transmission time
-#     before_mask = time_list < TransmissionTime
-#     after_mask = time_list > TransmissionTime
-
-#     times_before = time_list[before_mask]
-#     times_after = time_list[after_mask]
-#     pos_before = pos_list[before_mask]
-#     pos_after = pos_list[after_mask]
-
-#     # Step 4: Select interpolation window
-#     if len(times_before) >= 5 and len(times_after) >= 5:
-#         # Standard case: 5 before + 5 after
-#         times = np.concatenate([times_before[-5:], times_after[:5]])
-#         positions = np.concatenate([pos_before[-5:], pos_after[:5]])
-#     elif len(times_before) < 5 and len(times_after) >= PosInterpOrder:
-#         # Early edge case: not enough before, use 10 future points
-#         times = times_after[:PosInterpOrder]
-#         positions = pos_after[:PosInterpOrder]
-#     elif len(times_after) < 5 and len(times_before) >= PosInterpOrder:
-#         # Late edge case: not enough after, use 10 past points
-#         times = times_before[-PosInterpOrder:]
-#         positions = pos_before[-PosInterpOrder:]
-#     else:
-#         raise ValueError("Not enough SP3 points for interpolation")
-
-#     # Step 5: Define the Lagrange interpolation function
-#     # def lagrange_interp(x, x_vals, y_vals):
-#     #     result = 0.0
-#     #     for i in range(len(x_vals)):
-#     #         term = y_vals[i]
-#     #         for j in range(len(x_vals)):
-#     #             if i != j:
-#     #                 term *= (x - x_vals[j]) / (x_vals[i] - x_vals[j])
-#     #         result += term
-#     #     return result
-
-#     def lagrange_interp(x, x_vec, y_vec):
-#         if len(x_vec) != len(y_vec):
-#             raise ValueError("x_vec and y_vec must have the same length.")
-
-#         n = len(x_vec)
-#         L = np.ones(n)
-
-#         for i in range(n):
-#             for j in range(n):
-#                 if i != j:
-#                     L[i] *= (x - x_vec[j]) / (x_vec[i] - x_vec[j])
-
-#         return sum(y_vec[i] * L[i] for i in range(n))
-
-#     # Step 6: Interpolate each coordinate axis independently
-#     x = lagrange_interp(TransmissionTime, times, positions[:, 0])
-#     y = lagrange_interp(TransmissionTime, times, positions[:, 1])
-#     z = lagrange_interp(TransmissionTime, times, positions[:, 2])
-
-#     # Step 7: Convert from kilometers to meters
-#     return np.array([x, y, z]) * 1000
-
-
-
 
 def computeSatComPos(SatLabel, TransmissionTime, SatPosInfo, Sod, PosInterpOrder):
     """
@@ -568,20 +473,6 @@ def computeSatComPos(SatLabel, TransmissionTime, SatPosInfo, Sod, PosInterpOrder
 
 
 
-# def applySagnac(SatComPos, FlightTime):
-
-#     # Rotation vector
-#     omega_vec = np.array([0.0, 0.0, Const.OMEGA_EARTH]) # OMEGA_EARTH = Earth's rotation rate in rad/s
-
-#     # Cross product: omega x SatComPos
-#     sagnac_shift = np.cross(omega_vec, SatComPos) * FlightTime
-
-#     # Corrected position
-#     SatComPosCorr = SatComPos - sagnac_shift
-
-#     return SatComPosCorr
-
-
 def applySagnac(SatComPos, FlightTime):
     # Earth rotation angle during signal flight
     theta = Const.OMEGA_EARTH * FlightTime  # rad
@@ -597,29 +488,6 @@ def applySagnac(SatComPos, FlightTime):
 
     # Rotate the satellite position from transmit to receive frame
     return Rz @ SatComPos
-
-# def computeSatApo(SatComPos, RcvrPos, SunPos, ApoBody):
-#     """
-#     Computes satellite Antenna Phase Offset (APO) in ECEF.
-#     ApoBody: np.array([X, Y, Z]) in satellite body frame (meters)
-#     """
-#     # Get unit vectors i, j, k (satellite body frame)
-#     z_axis = -SatComPos / np.linalg.norm(SatComPos) 
-#     x_axis = SunPos - np.dot(SunPos, z_axis) * z_axis
-#     x_axis /= np.linalg.norm(x_axis)
-
-#     x_axis = SunPos / np.linalg.norm(SunPos)
-#     y_axis = np.cross(z_axis, x_axis)
-#     y_axis /= np.linalg.norm(y_axis)
-#     x_axis = np.cross(y_axis, z_axis)
-
-
-#     # Build rotation matrix from satellite body frame to ECEF
-#     R = np.column_stack((x_axis, y_axis, z_axis))
-
-#     # Transform to ECEF
-#     ApoEcef = R @ ApoBody
-#     return ApoEcef
 
 
 def computeSatApo(Sod, Rcvr2SatCom, SunPos, SatLabel, SatComPos, SatApoInfo):

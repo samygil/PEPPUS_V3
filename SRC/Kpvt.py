@@ -15,8 +15,9 @@
 
 import numpy as np
 import math
+from collections import OrderedDict
 from COMMON import GnssConstants as Const
-
+from COMMON.Coordinates import xyz2llh
 
 # ----------------------------------------------------------------------
 # INTERNAL FUNCTIONS
@@ -39,13 +40,13 @@ def _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos):
     for i in range(NumSats):
         sat_corr = ValidCorrInfo[i]
         
-        # Predicted Geometric Range based on current state estimate (RcvrPos is the predicted position)
+        # 1. Predicted Geometric Range (rho) based on current state estimate (RcvrPos)
         dx = sat_corr['SatX'] - RcvrPos[0]
         dy = sat_corr['SatY'] - RcvrPos[1]
         dz = sat_corr['SatZ'] - RcvrPos[2]
         GeomRange = math.sqrt(dx**2 + dy**2 + dz**2)
 
-        # Direction Cosines (partial derivatives w.r.t Rx, Ry, Rz)
+        # 2. Direction Cosines (partial derivatives w.r.t Rx, Ry, Rz)
         e_x = -dx / GeomRange # -dx/rho
         e_y = -dy / GeomRange # -dy/rho
         e_z = -dz / GeomRange # -dz/rho
@@ -56,7 +57,8 @@ def _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos):
         H[i, 2] = e_z
         
         # --- Receiver Clock State (dtr) ---
-        H[i, 3] = 1.0 # Derivative w.r.t to the bias *in meters* (dtr*c) is 1
+        # The state is the clock bias *in meters* (dtr*c), so the derivative w.r.t it is 1.0
+        H[i, 3] = 1.0 
         
         # Note: Ambiguity states (i > 3) are omitted for this simplified P_IF code measurement.
         # The corresponding H matrix elements remain zero.
@@ -72,7 +74,7 @@ def _computeWMatrix(NumSats, ValidCorrInfo):
     
     # Loop over satellites (i is the row/column index)
     for i in range(NumSats):
-        # We assume 'SigmaUere' holds the total variance (sigma^2)
+        # We assume 'SigmaUere' holds the total measurement variance (sigma^2)
         # Using a fallback value (10.0m^2) if the key is missing
         sigma_uere = ValidCorrInfo[i].get('SigmaUere', 10.0) 
         W[i, i] = sigma_uere # Assuming input is already variance (sigma^2)
@@ -90,22 +92,93 @@ def _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias):
     for i in range(NumSats):
         sat_corr = ValidCorrInfo[i]
 
-        # Observed Range (CorrCode is the corrected pseudorange, i.e., P_IF)
+        # 1. Observed Range (CorrCode is the corrected pseudorange, i.e., P_IF)
         ObservedRange = sat_corr.get('CorrCode', Const.NAN) 
         
-        # Estimated Geometric Range based on predicted Receiver Position
+        # 2. Estimated Geometric Range (rho) based on predicted Receiver Position
         dx = sat_corr['SatX'] - RcvrPos[0]
         dy = sat_corr['SatY'] - RcvrPos[1]
         dz = sat_corr['SatZ'] - RcvrPos[2]
-        EstimatedRange = math.sqrt(dx**2 + dy**2 + dz**2)
+        EstimatedRange = math.sqrt(dx**2 + dy**2 + dz**2) # Geometric Range (rho)
         
-        # Estimate of Range (R_est) = GeomRange + RcvrClkBias (in meters)
+        # 3. Estimated Total Range (R_est) = Geometric Range (rho) + Receiver Clock Bias (dtr * C)
         
-        # Innovation (Z) = Observed Range - Estimated Range
-        # Z = ObservedRange - (GeomRange + RcvrClkBias)
+        # 4. Innovation (Z) = Observed Range (P_IF) - Estimated Total Range (R_est)
+        # Z = ObservedRange - (EstimatedRange + RcvrClkBias)
         Z[i, 0] = ObservedRange - EstimatedRange - RcvrClkBias
 
     return Z
+
+def _computeRotMatrixEcef2Enu(Lat, Lon):
+    """
+    Computes the rotation matrix R from ECEF frame to Local Tangent Plane (ENU).
+    R is 3x3. Lat/Lon must be in radians.
+    """
+    sin_lat = math.sin(Lat)
+    cos_lat = math.cos(Lat)
+    sin_lon = math.sin(Lon)
+    cos_lon = math.cos(Lon)
+
+    # R is the matrix (e, n, u)^T where e, n, u are in ECEF frame
+    # e = East, n = North, u = Up
+    R = np.array([
+        [-sin_lon, cos_lon, 0.0],
+        [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+        [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
+    ])
+    return R
+
+def _computeDops(H, Lat, Lon):
+    """
+    Computes Dilution of Precision (DOP) values from the Geometry Matrix H.
+    H is the Design Matrix (NumSats x NumStates).
+    Lat/Lon must be in radians.
+    """
+    # Extract the geometry part of H (first 4 columns: x, y, z, dt)
+    # We only need the geometry for DOP calculation
+    G = H[:, 0:4]
+    
+    try:
+        # Compute the Cofactor Matrix Q = (G^T * G)^-1
+        Q = np.linalg.inv(G.T @ G)
+        
+        # Extract elements in ECEF frame
+        Qxx, Qyy, Qzz, Qtt = Q[0, 0], Q[1, 1], Q[2, 2], Q[3, 3]
+        
+        # GDOP (Geometric DOP) = sqrt(Qxx + Qyy + Qzz + Qtt)
+        GDOP = math.sqrt(Qxx + Qyy + Qzz + Qtt)
+        
+        # PDOP (Position DOP) = sqrt(Qxx + Qyy + Qzz)
+        PDOP = math.sqrt(Qxx + Qyy + Qzz)
+        
+        # TDOP (Time DOP) = sqrt(Qtt)
+        TDOP = math.sqrt(Qtt)
+        
+        # To compute HDOP and VDOP, we need to rotate the cofactor matrix to ENU
+        # Extract 3x3 position block
+        Q_xyz = Q[0:3, 0:3]
+        
+        # Compute Rotation Matrix ECEF -> ENU
+        R = _computeRotMatrixEcef2Enu(Lat, Lon)
+        
+        # Rotate covariance: Q_enu = R * Q_xyz * R^T
+        Q_enu = R @ Q_xyz @ R.T
+        
+        Qee = Q_enu[0, 0] # East
+        Qnn = Q_enu[1, 1] # North
+        Quu = Q_enu[2, 2] # Up
+        
+        # HDOP (Horizontal DOP) = sqrt(Qee + Qnn)
+        HDOP = math.sqrt(Qee + Qnn)
+        
+        # VDOP (Vertical DOP) = sqrt(Quu)
+        VDOP = math.sqrt(Quu)
+        
+        return GDOP, PDOP, HDOP, VDOP, TDOP
+        
+    except np.linalg.LinAlgError:
+        # Return NaNs if matrix inversion fails (e.g., bad geometry)
+        return Const.NAN, Const.NAN, Const.NAN, Const.NAN, Const.NAN
     
 # ----------------------------------------------------------------------
 # EXPORTED FUNCTIONS
@@ -127,11 +200,12 @@ def initKpvtSolution(Conf, RcvrInfo, Jd):
     # 1. Initialize State Vector (Xk_1)
     Xk_1 = np.zeros((NumStates, 1))
     
-    # Initial Position (from RcvrInfo - assuming index 8 holds the ECEF coordinates)
-    Xk_1[0, 0] = RcvrInfo[8][0] 
-    Xk_1[1, 0] = RcvrInfo[8][1] 
-    Xk_1[2, 0] = RcvrInfo[8][2] 
-    
+    # Initial Position (from RcvrInfo)
+    # CORRECTION: RcvrInfo[8] contains the tuple (X, Y, Z) in ECEF
+    # We access the tuple elements [0], [1], [2]
+    Xk_1[0, 0] = RcvrInfo[8][0] + 3.0 
+    Xk_1[1, 0] = RcvrInfo[8][1] + 3.0 
+    Xk_1[2, 0] = RcvrInfo[8][2] + 3.0 
     
     # Initial Clock Bias (0)
     Xk_1[3, 0] = 0.0 # in meters
@@ -169,7 +243,7 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
     
     Inputs:
         Conf: Configuration parameters.
-        RcvrInfo: Receiver static information (dictionary with X, Y, Z).
+        RcvrInfo: Receiver static information (list with ID, X, Y, Z).
         CorrInfoList: List of corrected measurements (dictionaries), one per satellite.
         Xk_1: State vector from the previous epoch.
         Pk_1: Covariance matrix from the previous epoch.
@@ -190,9 +264,13 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
     ValidCorrInfo = []
     MIN_NUM_SATS = 4 
     
+    # Access required keys for PosInfo output (from InputOutput)
+    # These keys are needed for the output structure in InputOutput.py
+    # Note: RcvrInfo is a list, index 0 is the ID (e.g., 'TLSA')
+    RcvrID = RcvrInfo[0]
+
     for sat_corr in CorrInfoList:
-        # Check Flag (Flag=1 for valid, Flag=0 for rejected/no data)
-        # Check if the core data (CorrCode and Sat Position) is available
+        # Check if Flag > 0 (valid) and core data (CorrCode and Sat Position) is available
         if (sat_corr.get('Flag', 0) > 0 and 
             sat_corr.get('CorrCode', Const.NAN) != 0.0 and 
             sat_corr.get('CorrCode', Const.NAN) != Const.NAN and
@@ -203,6 +281,7 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
     NumSats = len(ValidCorrInfo)
     
     # --- 2. Check for Solution Availability ---
+    # Use Sod from the first valid satellite, or from the raw list if none valid
     Sod = ValidCorrInfo[0]['Sod'] if NumSats > 0 else CorrInfoList[0]['Sod']
 
     if NumSats < MIN_NUM_SATS:
@@ -211,69 +290,75 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
         PosInfo = {
             'Sod': Sod,
             'Doy': Doy,
+            'Rcvr': RcvrID,
             'Sol': 0, # Sol Flag = 0 (No solution)
             'X': Const.NAN, 
             'Y': Const.NAN, 
             'Z': Const.NAN,
             'dt': Const.NAN,
-            'Lon': Const.NAN, # New: Longitude
-            'Lat': Const.NAN, # New: Latitude
-            'Alt': Const.NAN, # New: Altitude
-            'Clk': Const.NAN, # New: Clock Bias (in seconds)
+            'Lon': Const.NAN, 
+            'Lat': Const.NAN, 
+            'Alt': Const.NAN, 
+            'Clk': Const.NAN, 
             'NumSatVis': NumSats,
-            'NumSat': 0,      # New: NumSat
-            'Hpe': Const.NAN, # New: HPE
-            'Vpe': Const.NAN, # New: VPE
-            'Epe': Const.NAN, # New: EPE
-            'Npe': Const.NAN, # New: NPE
+            'NumSat': 0,      
+            'Hpe': Const.NAN, 
+            'Vpe': Const.NAN, 
+            'Epe': Const.NAN, 
+            'Npe': Const.NAN, 
             'PDOP': Const.NAN,
+            'HDOP': Const.NAN,
+            'VDOP': Const.NAN,
+            'TDOP': Const.NAN,
         }
         
         # Return previous state for the next prediction step
         return PosInfo, Xk_1, Pk_1, SatAmbiguityInfo 
 
-    # --- 3. Prediction Step ---
+    # --- 3. Prediction Step (Time Update) ---
     
     Fk = np.eye(Xk_1.shape[0])
     Qk = np.zeros(Pk_1.shape)
     dt = Conf["SAMPLING_RATE"] 
     
     # Receiver Clock Noise (dtr) - Index 3 (in meters^2/s)
+    # Use a default value if CLK_Q_PARAM is missing in configuration
     CLK_Q_PARAM = Conf.get("CLK_Q_PARAM", 1.0e-6) 
     Qk[3, 3] = CLK_Q_PARAM * dt
 
-    
     # Ambiguity Noise (Index 4 onwards) - modeled as static (small random walk)
     AMB_Q_PARAM = 1.0e-12 
     for i in range(4, Xk_1.shape[0]):
         Qk[i, i] = AMB_Q_PARAM * dt
         
-    # Predicted State Vector: Xk = Xk-1 (Static model)
+    # Predicted State Vector: Xk = Fk * Xk-1 (Static model: Fk is Identity)
     Xk = Fk @ Xk_1
     
     # Predicted Covariance Matrix: Pk = Fk * Pk-1 * Fk^T + Qk
     Pk = Fk @ Pk_1 @ Fk.T + Qk
     
-    # --- 4. Update Step ---
+    # --- 4. Update Step (Measurement Update) ---
 
     # Predicted Receiver Position and Clock (from Xk)
-    RcvrPos = Xk[0:3, 0] # [Rx, Ry, Rz]
-    RcvrClkBias = Xk[3, 0]  # dtr * C (in meters)
+    RcvrPos = Xk[0:3, 0]   # [Rx, Ry, Rz]
+    RcvrClkBias = Xk[3, 0] # dtr * C (in meters)
 
-    # Compute Measurement Innovation Vector (Z)
+    # 4.1 Compute Measurement Innovation Vector (Z)
     Z = _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias) 
     
-    # Compute Design Matrix (H)
+    # 4.2 Compute Design Matrix (H)
     NumStates = Xk.shape[0]
     H = _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos)
 
-    # Compute Measurement Noise Covariance Matrix (W/R)
+    # 4.3 Compute Measurement Noise Covariance Matrix (W/R)
     W = _computeWMatrix(NumSats, ValidCorrInfo)
     
-    # V = H * Pk * H^T + W (Innovation Covariance)
+    # 4.4 Compute Innovation Covariance (V)
+    # V = H * Pk * H^T + W 
     V = H @ Pk @ H.T + W
 
-    # Kalman Gain: K = Pk * H^T * V^-1
+    # 4.5 Compute Kalman Gain (K)
+    # K = Pk * H^T * V^-1
     try:
         V_inv = np.linalg.inv(V)
         K = Pk @ H.T @ V_inv
@@ -282,10 +367,12 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
         # Return previous state if update fails
         return PosInfo, Xk_1, Pk_1, SatAmbiguityInfo
 
-    # Update State Vector: Xk = Xk + K * Z
+    # 4.6 Update State Vector (Xk_update)
+    # Xk_update = Xk + K * Z
     Xk_update = Xk + K @ Z
 
-    # Update Covariance Matrix: Pk = (I - K * H) * Pk
+    # 4.7 Update Covariance Matrix (Pk_update)
+    # Pk_update = (I - K * H) * Pk
     I = np.eye(NumStates)
     Pk_update = (I - K @ H) @ Pk
     
@@ -298,87 +385,79 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
     Y_ecef = Xk_update[1, 0]
     Z_ecef = Xk_update[2, 0]
 
-    # Call the conversion function (Lat and Lon are now in radians)
-    Lon, Lat, Alt = convertXyz2Lla(X_ecef, Y_ecef, Z_ecef) 
+    # Use the standard ECEF to LLA conversion from Coordinates.py:
+    # xyz2llh returns (Lon_deg, Lat_deg, Alt_m - Ellipsoidal Height)
+    Lon_deg, Lat_deg, Alt = xyz2llh(X_ecef, Y_ecef, Z_ecef)
+    
+    # Convert Lon and Lat to Radians for further processing (e.g., rotation matrix)
+    Lon_rad = math.radians(Lon_deg)
+    Lat_rad = math.radians(Lat_deg)
 
-    # 5.2 Compute Position Error Statistics (HPE, VPE, EPE, NPE)
-    # These are placeholders. If your code expects calculated values from Pk_update, 
-    # you must add the covariance rotation logic here.
-    Hpe, Vpe, Epe, Npe = Const.NAN, Const.NAN, Const.NAN, Const.NAN
-    NumSat = NumSats # Total number of satellites used (equal to NumSatVis for this case)
+    # ----------------------------------------------------------------------
+    # NO Geoidal Correction applied here.
+    # The reference value seems to be Ellipsoidal Height (h).
+    # ----------------------------------------------------------------------
 
-    # 5.3 Compute PDOP
-    try:
-        Pk_pos = Pk_update[0:3, 0:3] 
-        PDOP = math.sqrt(np.trace(Pk_pos)) / 3.0 # Simplified
-    except:
-        PDOP = Const.NAN
+    # 5.3 Covariance Rotation (ECEF to ENU/Local) and DOP/PE Calculation
 
-    # Final PosInfo dictionary (NOW WITH ALL REQUIRED KEYS)
+    # 5.3.1 Extract the 3x3 position covariance block in ECEF
+    # Pk_update contains ECEF [X, Y, Z, Clk]
+    P_ecef_pos = Pk_update[0:3, 0:3]
+    
+    # 5.3.2 Compute ECEF-to-ENU Rotation Matrix (based on LLA in Radians)
+    R_enu_ecef = _computeRotMatrixEcef2Enu(Lat_rad, Lon_rad)
+    
+    # 5.3.3 Rotate ECEF position covariance to ENU (Local) frame
+    # P_ENU = R * P_ECEF * R^T
+    P_enu_pos = R_enu_ecef @ P_ecef_pos @ R_enu_ecef.T
+    
+    # 5.3.4 Extract variances and calculate Position Errors (PEs)
+    P_EE = P_enu_pos[0, 0] # East variance
+    P_NN = P_enu_pos[1, 1] # North variance
+    P_UU = P_enu_pos[2, 2] # Up variance
+    P_CC = Pk_update[3, 3] # Clock variance (in meters^2)
+
+    # Position Errors (PEs) - RMS values in meters (Standard Deviations)
+    Epe = math.sqrt(abs(P_EE))
+    Npe = math.sqrt(abs(P_NN))
+    Vpe = math.sqrt(abs(P_UU))
+    Hpe = math.sqrt(P_EE + P_NN) # Horizontal Position Error (2D RMS)
+
+    # 5.3.5 Calculate DOPs (Dilution of Precision) from Geometry
+    # We compute DOPs using the Design Matrix H and the Rotation Matrix
+    # This ensures HDOP != HPE
+    GDOP, PDOP, HDOP, VDOP, TDOP = _computeDops(H, Lat_rad, Lon_rad)
+    
+    NumSat = NumSats # Total number of satellites used
+
+    # 5.4 Final PosInfo dictionary 
     PosInfo = {
         'Sod': Sod,
         'Doy': Doy,
+        'Rcvr': RcvrID,
         'Sol': SolFlag, 
         'X': X_ecef, 
         'Y': Y_ecef, 
         'Z': Z_ecef,
         'dt': Xk_update[3, 0] / Const.SPEED_OF_LIGHT, 
-        # ADDED FIELDS FOR COMPATIBILITY WITH InputOutput.py
-        'Lon': Lon,        # New: Longitude (radians)
-        'Lat': Lat,        # New: Latitude (radians)
-        'Alt': Alt,        # New: Altitude (meters)
-        'Clk': Xk_update[3, 0] / Const.SPEED_OF_LIGHT, # New: Clock Bias in seconds (InputOutput Requirement)
+        'Lon': Lon_deg, # Longitude (degrees)
+        'Lat': Lat_deg, # Latitude (degrees)
+        'Alt': Alt,     # Altitude (meters) - Ellipsoidal Height (h)
+        # Clock Bias in METERS
+        'Clk': Xk_update[3, 0], 
         'NumSatVis': NumSats,
-        'NumSat': NumSat,  # New: Number of Satellites (InputOutput Requirement)
-        'Hpe': Hpe,        # New: Horizontal Error (Placeholder)
-        'Vpe': Vpe,        # New: Vertical Error (Placeholder)
-        'Epe': Epe,        # New: East Error (Placeholder)
-        'Npe': Npe,        # New: North Error (Placeholder)
-        # END OF ADDED FIELDS
+        'NumSat': NumSat, 
+        'Hpe': Hpe, # Horizontal Error (meters)
+        'Vpe': Vpe, # Vertical Error (meters)
+        'Epe': Epe, # East Error (meters)
+        'Npe': Npe, # North Error (meters)
+        # DOP FIELDS
         'PDOP': PDOP,
+        'HDOP': HDOP,
+        'VDOP': VDOP,
+        'TDOP': TDOP,
     }
     
     return PosInfo, Xk_update, Pk_update, SatAmbiguityInfo
-
-# Kpvt.py (Add ECEF to LLA function)
-def convertXyz2Lla(X, Y, Z):
-    """
-    Converts ECEF coordinates (X, Y, Z) to Geodetic (Lon, Lat, Alt) [rad, rad, m].
-    Uses WGS-84 and an iterative method.
-    """
-    # Required WGS-84 constants
-    a = Const.EARTH_SEMIAXIS     # 6378137.0 m
-    f = Const.FLATTENING         # 1.0/298.257223563
-    e2 = Const.E2                # f * (2 - f)
-    
-    # Length (p is the radial distance in the XY plane)
-    p = math.sqrt(X**2 + Y**2)
-    
-    if p < 1.0E-6:
-        # Position on the Z-axis (Pole)
-        Lon = Const.NAN
-        Lat = math.atan2(Z, 0.0) # pi/2 or -pi/2
-        Alt = abs(Z) - a * math.sqrt(1.0 - e2)
-    else:
-        # First estimate of Latitude and Altitude
-        Lat = math.atan2(Z, p * (1.0 - e2))
-        Alt = 0.0 # Initial value (zero)
-        
-        # Iteration for the desired precision (5 iterations are usually sufficient)
-        for i in range(5):
-            sin_lat = math.sin(Lat)
-            N = a / math.sqrt(1.0 - e2 * sin_lat**2)
-            Alt = p / math.cos(Lat) - N
-            Lat_new = math.atan2(Z + N * e2 * sin_lat, p)
-            if abs(Lat_new - Lat) < 1e-12: # Check convergence
-                Lat = Lat_new
-                break
-            Lat = Lat_new
-
-        # Longitude
-        Lon = math.atan2(Y, X)
-        
-    return Lon, Lat, Alt
-
 
 # End of Kpvt.py

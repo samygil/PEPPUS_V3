@@ -219,10 +219,10 @@ CorrIdx["SUERE"]=27
 # PVT
 # Header
 PosHdr = "\
-#SOD    DOY         LON             LAT             ALT             CLK   SOL  N_VIS   N_EST       HPE             VPE             EPE             NPE         Ambiguities...\n"
+SOD       DOY RCVR LONEST     LATEST      ALTEST       CLKEST        SOL NSVVIS NSV    HPE      VPE      EPE      NPE      HDOP     VDOP    PDOP     TDOP\n"
 
 # Line format
-PosFmt = "%05d %03d %14.8f %14.8f %14.8f %14.8f %4d %4d %4d %14.8f %14.8f %14.8f %14.8f ".split()
+PosFmt = "%05.1f %03d %4s %10.5f %10.5f %11.3f %13.3f %4d %4d %4d %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f".split()
 
 # File columns
 PosIdx = OrderedDict({})
@@ -900,9 +900,6 @@ def readConf(CfgFile):
     #     sys.stderr.write("ERROR: Wrong number of conf parameters\n")
     #     sys.exit(-1)
 
-
-
-
     return Conf
 
 # End of readConf()
@@ -938,10 +935,10 @@ def processConf(Conf):
                     )
                 )
 
-    # Processa Process Noise e Covariance Initialization
+    # Process Noise e Covariance Initialization
     Conf["KALMAN_FILTER"] = {}
     
-    # [m]
+    # [m
     Conf["KALMAN_FILTER"]["P_A"] = float(Conf["COVARIANCE_INI"][0]) 
     
     # [m] (Ambiguity sigma_0)
@@ -950,8 +947,7 @@ def processConf(Conf):
     # [m/sqrt(s)] (Receiver Position Process Noise)
     Conf["KALMAN_FILTER"]["Q_POS"] = float(Conf["RCVRPOS_NOISE"]) 
     
-    # [m/sqrt(s)] (Receiver Clock Process Noise: O valor é em m/s na maioria das implementações, mas o parâmetro é lido em m, então assumimos que a conversão será tratada em Kpvt)
-    # Aqui apenas transferimos o valor lido do .cfg
+    # [m/sqrt(s)] Receiver Clock Process Noise
     Conf["KALMAN_FILTER"]["Q_CLK"] = float(Conf["RCVRCLK_NOISE"])
     
     # [m/sqrt(h)] (Delta ZTD Process Noise)
@@ -981,11 +977,10 @@ def processConf(Conf):
     EndMonth = int(EndDateSplit[1])
     EndYear = int(EndDateSplit[2])
 
-    # Usa a função correta que retorna um único Doy, e extrai o Ano separadamente.
     Conf["END_DOY"] = convertYearMonthDay2Doy(EndYear, EndMonth, EndDay)
     Conf["END_YEAR"] = EndYear
 
-    # Converte os outputs para booleanos/inteiros
+    # Converte the output to boolean values
     Conf["PREPRO_OUT"] = bool(Conf["PREPRO_OUT"])
     Conf["PCOR_OUT"] = bool(Conf["PCOR_OUT"])
     Conf["PVT_OUT"] = bool(Conf["PVT_OUT"])
@@ -993,48 +988,53 @@ def processConf(Conf):
 
     return Conf
 
+FMT_18_FIELDS = "{:05d} {:03d} {:<4s} {:<11.5f} {:<11.5f} {:<11.3f} {:<11.3f} {:<3d} {:<4d} {:<4d} {:<7.3f} {:<7.3f} {:<7.3f} {:<7.3f} {:<7.3f} {:<7.3f} {:<7.3f} {:<7.3f}"
 
 def generatePosFile(fpvt, PosInfo):
     """
-    Escreve as informações de PosInfo no arquivo PVT.
-    fpvt: File pointer para o arquivo de saída PVT.
-    PosInfo: Dicionário contendo a solução PVT para a época.
+    Write the information of PosInfo into the PVT file.
     """
+    
+    # Check Solution Flag (Sol = 0 means No Solution)
     if PosInfo['Sol'] == 0:
-        # Sem solução (NAN)
-        output_line = "{:9.1f}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}{:4d}{:4d}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}".format(
-            PosInfo["Sod"],
+        output_line = FMT_18_FIELDS.format(
+            int(PosInfo["Sod"]), # Cast SOD to int for {:05d}
             PosInfo["Doy"],
-            Const.NAN, Const.NAN, Const.NAN, Const.NAN,
+            PosInfo["Rcvr"], 
+            0.0, 0.0, 0.0, 0.0, # Lon, Lat, Alt, Clk (All 0.0)
             PosInfo["Sol"],
             PosInfo["NumSatVis"],
-            0, # NumSat (estimados)
-            Const.NAN, Const.NAN, Const.NAN, Const.NAN
+            0, # NumSat Used 
+            0.0, 0.0, 0.0, 0.0, # Hpe, Vpe, Epe, Npe 
+            0.0, 0.0, 0.0, 0.0  # HDOP, VDOP, PDOP, TDOP 
         )
     else:
-        # Valores estáticos (Sod a Npe)
-        R2D = 180.0 / math.pi
-        output_line = "{:9.1f}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}{:4d}{:4d}{:4d}{:14.8f}{:14.8f}{:14.8f}{:14.8f}".format(
-            PosInfo["Sod"],
+        # Solution found (Sol = 1)
+        output_line = FMT_18_FIELDS.format(
+            int(PosInfo["Sod"]), # Cast SOD to int
             PosInfo["Doy"],
-            PosInfo["Lon"] * R2D, # Convertido para graus
-            PosInfo["Lat"] * R2D, # Convertido para graus
-            PosInfo["Alt"],
-            PosInfo["Clk"],
+            PosInfo["Rcvr"], 
+            PosInfo["Lon"], # Degrees
+            PosInfo["Lat"], # Degrees
+            PosInfo["Alt"], # Meters (Ellipsoidal)
+            PosInfo["Clk"], # Meters
             PosInfo["Sol"],
             PosInfo["NumSatVis"],
-            PosInfo["NumSat"],
+            PosInfo["NumSat"], 
             PosInfo["Hpe"],
             PosInfo["Vpe"],
             PosInfo["Epe"],
-            PosInfo["Npe"]
+            PosInfo["Npe"],
+            PosInfo["HDOP"], 
+            PosInfo["VDOP"],
+            PosInfo["PDOP"],
+            PosInfo["TDOP"] 
         )
         
-        # Ambiguidades (flat array)
-        if "Amb" in PosInfo and PosInfo["Amb"].size > 0:
-            # Assumimos que Amb é um array NumPy de ambiguidades estimadas
-            amb_str = "".join(["{:14.8f}".format(amb) for amb in PosInfo["Amb"].flatten()])
-            output_line += amb_str
+    # Ambiguities (flat array)
+    if "Amb" in PosInfo and PosInfo["Amb"].size > 0:
+        amb_str = "".join(["{:14.8f}".format(amb) for amb in PosInfo["Amb"].flatten()])
+        output_line += amb_str
     
     fpvt.write(output_line + '\n')
 
