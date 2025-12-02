@@ -23,7 +23,7 @@ from COMMON.Coordinates import xyz2llh
 # INTERNAL FUNCTIONS
 # ----------------------------------------------------------------------
 
-def _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos):
+def _computeGeometryMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos):
     """
     Computes the measurement matrix (H matrix) for the Kalman Filter.
     
@@ -34,7 +34,7 @@ def _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos):
     """
     
     # We assume 1 measurement (P_IF) per sat
-    H = np.zeros((NumSats, NumStates)) 
+    GeometryMatrix = np.zeros((NumSats, NumStates)) 
 
     # Loop over satellites
     for i in range(NumSats):
@@ -52,18 +52,19 @@ def _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos):
         e_z = -dz / GeomRange # -dz/rho
 
         # --- Position States (Rx, Ry, Rz) ---
-        H[i, 0] = e_x
-        H[i, 1] = e_y
-        H[i, 2] = e_z
+        GeometryMatrix[i, 0] = e_x
+        GeometryMatrix[i, 1] = e_y
+        GeometryMatrix[i, 2] = e_z
         
         # --- Receiver Clock State (dtr) ---
         # The state is the clock bias *in meters* (dtr*c), so the derivative w.r.t it is 1.0
-        H[i, 3] = 1.0 
+        GeometryMatrix[i, 3] = 1.0 
         
-        # Note: Ambiguity states (i > 3) are omitted for this simplified P_IF code measurement.
-        # The corresponding H matrix elements remain zero.
+        # --- ZTD Residual State (dZTD) ---
+        # Partial Derivative d(rho)/d(ZTD) = Mapping function
+        GeometryMatrix[i, 4] = sat_corr.get('TropoMpp', 1.0)
 
-    return H
+    return GeometryMatrix
 
 def _computeWMatrix(NumSats, ValidCorrInfo):
     """
@@ -81,7 +82,7 @@ def _computeWMatrix(NumSats, ValidCorrInfo):
         
     return W
 
-def _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias):
+def _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias, ZtdResidual):
     """
     Computes the measurement innovation vector (Z).
     Z = Observed Range - Estimated Range (from current state Xk_1)
@@ -104,8 +105,11 @@ def _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias):
         # 3. Estimated Total Range (R_est) = Geometric Range (rho) + Receiver Clock Bias (dtr * C)
         
         # 4. Innovation (Z) = Observed Range (P_IF) - Estimated Total Range (R_est)
+        TropoMpp = ValidCorrInfo[i].get('TropoMpp', 1.0)
+        TropoDelay = ZtdResidual * TropoMpp
+
         # Z = ObservedRange - (EstimatedRange + RcvrClkBias)
-        Z[i, 0] = ObservedRange - EstimatedRange - RcvrClkBias
+        Z[i, 0] = ObservedRange - EstimatedRange - RcvrClkBias - TropoDelay
 
     return Z
 
@@ -194,47 +198,58 @@ def initKpvtSolution(Conf, RcvrInfo, Jd):
     - [4:]: Float Ambiguities 
     """
     
-    MAX_SATS = Const.MAX_NUM_SATS_CONSTEL
-    NumStates = 4 + MAX_SATS # Max size: 4 fixed states + Max ambiguities
+    MAX_SATS = Const.MAX_NUM_SATS_CONSTEL # Maximum number of satellites per constellation, to define the Kalman matrix size
+    NumStates = 5 + MAX_SATS # Max size: 5 fixed states necessary for Kalman filter (X, Y, Z, b, ZTD) + Max ambiguities (one for each satellite)
 
     # 1. Initialize State Vector (Xk_1)
     Xk_1 = np.zeros((NumStates, 1))
     
-    # Initial Position (from RcvrInfo)
-    # CORRECTION: RcvrInfo[8] contains the tuple (X, Y, Z) in ECEF
+    # RcvrInfo[8] contains the tuple (X, Y, Z) in ECEF
     # We access the tuple elements [0], [1], [2]
-    Xk_1[0, 0] = RcvrInfo[8][0] + 3.0 
-    Xk_1[1, 0] = RcvrInfo[8][1] + 3.0 
-    Xk_1[2, 0] = RcvrInfo[8][2] + 3.0 
+    # Note: the PDF file states "The Estimated Position of the receiver to the Reference Position of the receiver shifted of 3m each coordinate"
+    # Usually we add 3m to each coordinate for initialization, in a way to test our convergence. Otherwise, we can just use the RcvrInfo[8] values directly.
+    Xk_1[0, 0] = RcvrInfo[8][0] + 3.0 # X
+    Xk_1[1, 0] = RcvrInfo[8][1] + 3.0 # Y
+    Xk_1[2, 0] = RcvrInfo[8][2] + 3.0 # Z
     
-    # Initial Clock Bias (0)
-    Xk_1[3, 0] = 0.0 # in meters
+    # Initial Clock Bias (0) as recommended by PDF file
+    Xk_1[3, 0] = 0.0 # bj in meters
     
-    # Ambiguities (0) - indices 4 to end
-    
+    # Initial ZTD Residual (0)
+    Xk_1[4, 0] = 0.0
+
+    # Ambiguities initialized to 0.0 by default (from np.zeros)
+
     # 2. Initialize Covariance Matrix (Pk_1)
     Pk_1 = np.zeros((NumStates, NumStates))
     
-    # Initial Position Variance 
-    INIT_POS_SIGMA = 300.0 # m
-    for i in range(3):
-        Pk_1[i, i] = INIT_POS_SIGMA ** 2 
+    # Retrieve values from Configuration (COVARIANCE_INI)
+    # Structure in cfg: [Sigma E, Sigma N, Sigma U, Sigma Clk, Sigma ZTD, Sigma Amb]
+    # Using .get() as a defensive measure, but expecting the cfg values to be present
+    cov_ini = Conf.get("COVARIANCE_INI", [300.0, 300.0, 300.0, 1000.0, 0.5, 100.0])
+
+    # Initial Position Variance (Index 0, 1, 2)
+    Pk_1[0, 0] = float(cov_ini[0]) ** 2  # Sigma East^2
+    Pk_1[1, 1] = float(cov_ini[1]) ** 2  # Sigma North^2
+    Pk_1[2, 2] = float(cov_ini[2]) ** 2  # Sigma Up^2
         
-    # Initial Clock Variance (in meters^2)
-    INIT_CLK_SIGMA = 1000.0 # m
-    Pk_1[3, 3] = INIT_CLK_SIGMA ** 2
+    # Initial Clock Variance (Index 3)
+    Pk_1[3, 3] = float(cov_ini[3]) ** 2  # Sigma Clock^2
     
-    # Initial Ambiguity Variance (very large)
-    INIT_AMB_SIGMA = 1000.0 # m
+    # Initial ZTD Variance (Index 4) - If ZTD is in the state vector
+    Pk_1[4, 4] = float(cov_ini[4]) ** 2  # Sigma ZTD^2
+    
+    # Initial Ambiguity Variance (Index 5 to End)
+    SIGMA_AMB = float(cov_ini[5])
     for i in range(4, NumStates):
-        Pk_1[i, i] = INIT_AMB_SIGMA ** 2
+        Pk_1[i, i] = SIGMA_AMB ** 2
 
     # Map of Ambiguity indices (Sat ID -> index in X vector)
     SatAmbiguityInfo = {}
     
     # Note: SatAmbiguityInfo will be populated in the first epoch a satellite is tracked.
     
-    return Xk_1, Pk_1, SatAmbiguityInfo
+    return Xk_1, Pk_1, SatAmbiguityInfo # Return initial state matrix, covariance matrix, and ambiguity map
 
 
 def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbiguityInfo_1):
@@ -342,13 +357,14 @@ def computeKpvtSolution(Conf, RcvrInfo, CorrInfoList, Xk_1, Pk_1, Doy, SatAmbigu
     # Predicted Receiver Position and Clock (from Xk)
     RcvrPos = Xk[0:3, 0]   # [Rx, Ry, Rz]
     RcvrClkBias = Xk[3, 0] # dtr * C (in meters)
+    ZtdResidual = Xk[4, 0]  # ZTD Residual (in meters)
 
     # 4.1 Compute Measurement Innovation Vector (Z)
-    Z = _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias) 
+    Z = _computeZVector(NumSats, ValidCorrInfo, RcvrPos, RcvrClkBias, ZtdResidual)
     
     # 4.2 Compute Design Matrix (H)
     NumStates = Xk.shape[0]
-    H = _computeHMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos)
+    H = _computeGeometryMatrix(NumStates, NumSats, ValidCorrInfo, RcvrPos)
 
     # 4.3 Compute Measurement Noise Covariance Matrix (W/R)
     W = _computeWMatrix(NumSats, ValidCorrInfo)

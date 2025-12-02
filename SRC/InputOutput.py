@@ -956,10 +956,10 @@ def processConf(Conf):
     # [m] (Phase Measurement sigma)
     Conf["KALMAN_FILTER"]["PHASE_SIGMA"] = float(Conf["PHASE_SIGMA"])
 
-    # [satélites] (Minimum Number of Satellites)
+    # [satellites] (Minimum Number of Satellites)
     Conf["MIN_NSATS"] = int(Conf["MIN_NSATS"])
 
-    # Processa Datas
+    # Process Dates
     IniDateSplit = Conf['INI_DATE'].split('/')
 
     Day = int(IniDateSplit[0])
@@ -980,7 +980,7 @@ def processConf(Conf):
     Conf["END_DOY"] = convertYearMonthDay2Doy(EndYear, EndMonth, EndDay)
     Conf["END_YEAR"] = EndYear
 
-    # Converte the output to boolean values
+    # Convert the output to boolean values
     Conf["PREPRO_OUT"] = bool(Conf["PREPRO_OUT"])
     Conf["PCOR_OUT"] = bool(Conf["PCOR_OUT"])
     Conf["PVT_OUT"] = bool(Conf["PVT_OUT"])
